@@ -2,6 +2,7 @@
 
 WEBHOOK_URL="https://hooks.slack.com/services/XXX/YYY/ZZZ"
 LOG_FILE="/var/log/certbot-renew.log"
+TMP_LOG="/tmp/certbot-run.log"
 NOW=$(date +"%Y-%m-%d %H:%M:%S")
 
 send_slack_notification() {
@@ -20,19 +21,26 @@ send_slack_notification() {
 
 echo "=== [$NOW] Starting certificate renewal ===" >> "$LOG_FILE"
 
-# Run Certbot renewal (no deploy-hook inside container)
+# Run certbot and capture full output in temp file
 docker compose -f /root/chirpstack-docker/docker-compose.certbot.yml exec certbot certbot renew \
-  --webroot -w /var/www/certbot >> "$LOG_FILE" 2>&1
+  --webroot -w /var/www/certbot > "$TMP_LOG" 2>&1
 
 RET=$?
+cat "$TMP_LOG" >> "$LOG_FILE"
 
-if [ $RET -eq 0 ]; then
-  echo "Reloading nginx container..." >> "$LOG_FILE"
-  docker exec nginx nginx -s reload >> "$LOG_FILE" 2>&1
-
-  echo "=== [$NOW] Renewal succeeded ===" >> "$LOG_FILE"
-  send_slack_notification "SUCCEEDED" "good"
-else
+if [ $RET -ne 0 ]; then
   echo "!!! [$NOW] Renewal failed with exit code $RET ===" >> "$LOG_FILE"
   send_slack_notification "FAILED (exit $RET)" "danger"
+else
+  if grep -q "Congratulations, all renewals succeeded:" "$TMP_LOG"; then
+    echo "Reloading nginx container..." >> "$LOG_FILE"
+    docker exec nginx nginx -s reload >> "$LOG_FILE" 2>&1
+
+    echo "=== [$NOW] Renewal succeeded ===" >> "$LOG_FILE"
+    send_slack_notification "SUCCEEDED – certificate renewed" "good"
+  else
+    echo "=== [$NOW] No renewal needed – no notification sent ===" >> "$LOG_FILE"
+  fi
 fi
+
+rm -f "$TMP_LOG"
